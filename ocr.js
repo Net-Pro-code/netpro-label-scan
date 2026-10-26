@@ -15,7 +15,8 @@ export async function readTextLines(uri) {
         text: l.text,
         top: l.frame && l.frame.top != null ? l.frame.top : null,
         height: l.frame && l.frame.height != null ? l.frame.height : null,
-        left: l.frame && l.frame.left != null ? l.frame.left : 0,
+        left: l.frame && l.frame.left != null ? l.frame.left : null,
+        width: l.frame && l.frame.width != null ? l.frame.width : null,
       })
     )
   );

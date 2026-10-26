@@ -12,7 +12,9 @@ import {
   Alert,
   Vibration,
   StatusBar,
+  ActivityIndicator,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { readTextLines } from './ocr';
@@ -81,6 +83,16 @@ const SCAN_DELAY = 1500;
 const MAX_QTY = 9999;
  
 // ---------- helpers ----------
+
+// food-colour circles with the item's first letter
+const AVATARS = ['#E4572E', '#F2A900', '#2D9F5B', '#7B4B94', '#2A7FBA', '#C2410C'];
+function avatarColor(name) {
+  let h = 0;
+  for (let k = 0; k < name.length; k++) h = (h * 31 + name.charCodeAt(k)) >>> 0;
+  return AVATARS[h % AVATARS.length];
+}
+const initialOf = (n) => ((n || '').trim()[0] || '?').toUpperCase();
+
  
 // QR format: "Rice 2kg,4500"  (name,price) - price is the part after the LAST comma
 function parseQR(data) {
@@ -147,6 +159,8 @@ export default function App() {
   const pendingCode = useRef({ code: '', time: 0 }); // last barcode scanned, to attach to a label photo
   const [busy, setBusy] = useState(false);
   const [lNote, setLNote] = useState('');
+  const [lRaw, setLRaw] = useState(''); // what the camera read, for checking
+  const [showRaw, setShowRaw] = useState(false);
 
   // load saved data
   useEffect(() => {
@@ -238,8 +252,10 @@ export default function App() {
   }
  
   // ----- new barcode (learn) and edit product -----
-  function showLearn(mode, code, name, price, note) {
+  function showLearn(mode, code, name, price, note, raw) {
     learnOpenRef.current = true;
+    setLRaw(raw || '');
+    setShowRaw(false);
     setLearnMode(mode);
     setLearnCode(code);
     setLName(name);
@@ -256,7 +272,7 @@ export default function App() {
     setMessageType('info');
     setMessage('Reading label...');
     try {
-      const pic = await cameraRef.current.takePictureAsync({ quality: 0.8 });
+      const pic = await cameraRef.current.takePictureAsync({ quality: 1 });
       const lines = await readTextLines(pic.uri);
       const parsed = parseLabel(lines, pic.height);
       if (!parsed.price) {
@@ -265,19 +281,30 @@ export default function App() {
         setMessage('No price found. Move closer so the label fills the frame.');
         return;
       }
-      Vibration.vibrate(80);
-      // attach the barcode only if it was scanned a moment ago
+      // the barcode number printed on the label (checked), else one scanned a moment ago
       const fresh = Date.now() - pendingCode.current.time < 30000;
-      const code = fresh ? pendingCode.current.code : '';
+      const code = parsed.code ? normalizeCode(parsed.code) : fresh ? pendingCode.current.code : '';
       const saved = code ? products[code] : null;
-      const note =
-        saved && saved.price !== parsed.price
-          ? `Saved price was ${formatMWK(saved.price)} - saving will update it.`
-          : '';
-      showLearn('label', code, parsed.name, String(parsed.price), note);
+
+      // a product the app already knows, at the same price: add it, no form
+      if (saved && saved.price === parsed.price && !parsed.guessed) {
+        Vibration.vibrate(80);
+        addToList({ name: saved.name, price: saved.price }, 1);
+        setMessageType('ok');
+        setMessage(`Added: ${saved.name}  ${formatMWK(saved.price)}`);
+        return;
+      }
+
+      Vibration.vibrate(80);
+      let note = '';
+      if (parsed.guessed) note = 'The "MK" was unclear, so this price is a guess. Check it.';
+      else if (saved && saved.price !== parsed.price)
+        note = `Saved price was ${formatMWK(saved.price)} - saving will update it.`;
+      const raw = lines.map((l) => l.text).join('\n');
+      showLearn('label', code, parsed.name, String(parsed.price), note, raw);
     } catch (e) {
       setMessageType('error');
-      setMessage('Could not read the label. Try again or use + Add item.');
+      setMessage('Could not read the label. Try again or use Add item.');
     } finally {
       setBusy(false);
     }
@@ -435,7 +462,7 @@ export default function App() {
     const cameraReady = !!(permission && permission.granted);
     return (
       <View style={{ flex: 1 }}>
-        {/* Camera with corner-only frame and hint label on top */}
+        {/* Camera with corner-only frame, status pill and Read label button */}
         <View style={styles.cameraWrap}>
           {cameraReady ? (
             <>
@@ -455,26 +482,18 @@ export default function App() {
             </>
           ) : (
             <View style={styles.noCamera}>
+              <Ionicons name="camera-outline" size={34} color="#fff" />
               <Text style={styles.noCameraText}>
-                Camera access is needed to scan QR codes and barcodes.
+                Allow the camera to scan QR codes, barcodes and shelf labels.
               </Text>
               {permission ? (
                 <TouchableOpacity style={styles.allowBtn} onPress={requestPermission}>
                   <Text style={styles.allowBtnText}>Allow camera</Text>
                 </TouchableOpacity>
               ) : null}
-              <Text style={styles.noCameraSub}>You can still use "+ Add item" below.</Text>
+              <Text style={styles.noCameraSub}>You can still use Add item below.</Text>
             </View>
           )}
-          {cameraReady && Platform.OS !== 'web' ? (
-            <TouchableOpacity
-              style={[styles.readBtn, busy && styles.btnDisabled]}
-              onPress={readLabelPhoto}
-              disabled={busy}
-            >
-              <Text style={styles.readBtnText}>{busy ? 'Reading...' : '📷 Read label'}</Text>
-            </TouchableOpacity>
-          ) : null}
           <View
             pointerEvents="none"
             style={[
@@ -487,79 +506,122 @@ export default function App() {
               {message}
             </Text>
           </View>
+          {cameraReady && Platform.OS !== 'web' ? (
+            <TouchableOpacity
+              style={[styles.readBtn, busy && styles.btnDisabled]}
+              onPress={readLabelPhoto}
+              disabled={busy}
+              activeOpacity={0.85}
+            >
+              {busy ? (
+                <ActivityIndicator size="small" color={KALE} />
+              ) : (
+                <Ionicons name="pricetag" size={18} color={KALE} />
+              )}
+              <Text style={styles.readBtnText}>{busy ? 'Reading label' : 'Read label'}</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
- 
-        {/* Total card */}
+
+        {/* Basket total */}
         <View style={styles.totalCard}>
-          <Text style={styles.totalLabel}>
-            TOTAL ({units} item{units === 1 ? '' : 's'})
-          </Text>
-          <Text style={styles.totalValue}>{formatMWK(total)}</Text>
+          <View style={styles.totalTop}>
+            <Text style={styles.totalLabel}>Basket total</Text>
+            <View style={styles.countChip}>
+              <Ionicons name="basket" size={13} color={MANGO} />
+              <Text style={styles.countChipText}>
+                {units} item{units === 1 ? '' : 's'}
+              </Text>
+            </View>
+          </View>
+          <View style={styles.totalMoney}>
+            <Text style={styles.cur}>MWK</Text>
+            <Text style={styles.totalValue} numberOfLines={1} adjustsFontSizeToFit>
+              {formatMWK(total).replace('MWK ', '')}
+            </Text>
+          </View>
         </View>
- 
+
         {/* Items */}
         <FlatList
           style={{ flex: 1 }}
-          contentContainerStyle={{ paddingBottom: 8 }}
+          contentContainerStyle={{ paddingBottom: 8, flexGrow: 1 }}
           data={items}
           keyExtractor={(i) => i.id}
           keyboardShouldPersistTaps="handled"
           ListEmptyComponent={
-            <Text style={styles.empty}>No items added yet. Scan a QR code or barcode to add.</Text>
+            <View style={styles.emptyBox}>
+              <View style={styles.emptyIcon}>
+                <Ionicons name="basket-outline" size={38} color={LEAF} />
+              </View>
+              <Text style={styles.emptyTitle}>Your basket is empty</Text>
+              <Text style={styles.emptyText}>
+                Scan a QR code or barcode, tap Read label on a shelf price, or use Add item.
+              </Text>
+            </View>
           }
           renderItem={({ item }) => (
             <View style={styles.row}>
-              <View style={styles.rowTop}>
-                <Text style={styles.rowName} numberOfLines={1}>
-                  {item.name}
-                </Text>
-                <TouchableOpacity onPress={() => removeItem(item.id)} style={styles.removeBtn}>
-                  <Text style={styles.removeText}>✕</Text>
-                </TouchableOpacity>
+              <View style={[styles.avatar, { backgroundColor: avatarColor(item.name) }]}>
+                <Text style={styles.avatarText}>{initialOf(item.name)}</Text>
               </View>
-              <View style={styles.rowBottom}>
-                <Text style={styles.unitPrice}>{formatMWK(item.price)} each</Text>
- 
-                <View style={styles.stepper}>
-                  <TouchableOpacity style={styles.stepBtn} onPress={() => changeQty(item.id, -1)}>
-                    <Text style={styles.stepText}>−</Text>
-                  </TouchableOpacity>
-                  <TextInput
-                    key={item.id + '-' + qtyOf(item)}
-                    style={styles.qtyInput}
-                    defaultValue={String(qtyOf(item))}
-                    keyboardType="number-pad"
-                    maxLength={4}
-                    selectTextOnFocus
-                    onEndEditing={(e) => setQty(item.id, e.nativeEvent.text)}
-                  />
-                  <TouchableOpacity style={styles.stepBtn} onPress={() => changeQty(item.id, 1)}>
-                    <Text style={styles.stepText}>+</Text>
+              <View style={{ flex: 1 }}>
+                <View style={styles.rowTop}>
+                  <Text style={styles.rowName} numberOfLines={1}>
+                    {item.name}
+                  </Text>
+                  <TouchableOpacity onPress={() => removeItem(item.id)} style={styles.removeBtn}>
+                    <Ionicons name="close-circle" size={22} color="#c9d3cc" />
                   </TouchableOpacity>
                 </View>
- 
-                <Text style={styles.rowPrice}>{formatMWK(lineTotal(item))}</Text>
+                <Text style={styles.unitPrice}>{formatMWK(item.price)} each</Text>
+                <View style={styles.rowBottom}>
+                  <View style={styles.stepper}>
+                    <TouchableOpacity style={styles.stepBtn} onPress={() => changeQty(item.id, -1)}>
+                      <Ionicons name="remove" size={18} color={KALE} />
+                    </TouchableOpacity>
+                    <TextInput
+                      key={item.id + '-' + qtyOf(item)}
+                      style={styles.qtyInput}
+                      defaultValue={String(qtyOf(item))}
+                      keyboardType="number-pad"
+                      maxLength={4}
+                      selectTextOnFocus
+                      onEndEditing={(e) => setQty(item.id, e.nativeEvent.text)}
+                    />
+                    <TouchableOpacity
+                      style={[styles.stepBtn, styles.stepBtnPlus]}
+                      onPress={() => changeQty(item.id, 1)}
+                    >
+                      <Ionicons name="add" size={18} color="#fff" />
+                    </TouchableOpacity>
+                  </View>
+                  <Text style={styles.rowPrice}>{formatMWK(lineTotal(item))}</Text>
+                </View>
               </View>
             </View>
           )}
         />
- 
+
         {/* Buttons */}
         <View style={styles.actions}>
-          <TouchableOpacity style={[styles.secondaryBtn, { flex: 1 }]} onPress={clearAll}>
-            <Text style={styles.secondaryBtnText}>Clear</Text>
+          <TouchableOpacity style={[styles.ghostBtn, { flex: 1 }]} onPress={clearAll}>
+            <Ionicons name="trash-outline" size={18} color={CHILLI} />
+            <Text style={styles.ghostBtnText}>Clear</Text>
           </TouchableOpacity>
           <TouchableOpacity style={[styles.secondaryBtn, { flex: 1.3 }]} onPress={openManual}>
-            <Text style={styles.secondaryBtnText}>+ Add item</Text>
+            <Ionicons name="add" size={20} color={KALE} />
+            <Text style={styles.secondaryBtnText}>Add item</Text>
           </TouchableOpacity>
           <TouchableOpacity
-            style={[styles.primaryBtn, { flex: 1.6 }, items.length === 0 && styles.btnDisabled]}
+            style={[styles.primaryBtn, { flex: 1.5 }, items.length === 0 && styles.btnDisabled]}
             onPress={saveList}
           >
+            <Ionicons name="checkmark-circle" size={20} color="#fff" />
             <Text style={styles.primaryBtnText}>Save list</Text>
           </TouchableOpacity>
         </View>
- 
+
         {/* Manual entry (no QR code) */}
         <Modal
           visible={manualOpen}
@@ -651,17 +713,22 @@ export default function App() {
           </Text>
         }
         ListEmptyComponent={
-          <Text style={styles.empty}>No products yet. Scan a barcode to teach the app.</Text>
+          <Text style={styles.empty}>No products yet. Scan a barcode or read a label and the app remembers it.</Text>
         }
         renderItem={({ item: p }) => (
-          <TouchableOpacity style={styles.card} onPress={() => openEdit(p.code)}>
-            <View style={styles.cardRow}>
-              <Text style={[styles.cardMeta, { flex: 1 }]} numberOfLines={1}>
-                {p.name}
-              </Text>
+          <TouchableOpacity style={styles.card} onPress={() => openEdit(p.code)} activeOpacity={0.8}>
+            <View style={styles.cardLine}>
+              <View style={[styles.avatar, { backgroundColor: avatarColor(p.name) }]}>
+                <Text style={styles.avatarText}>{initialOf(p.name)}</Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.cardName} numberOfLines={1}>
+                  {p.name}
+                </Text>
+                <Text style={styles.cardDate}>Code {p.code}</Text>
+              </View>
               <Text style={styles.cardTotal}>{formatMWK(p.price)}</Text>
             </View>
-            <Text style={styles.cardDate}>Code {p.code}</Text>
           </TouchableOpacity>
         )}
       />
@@ -675,7 +742,7 @@ export default function App() {
         contentContainerStyle={{ padding: 12 }}
         data={history}
         keyExtractor={(h) => h.id}
-        ListEmptyComponent={<Text style={styles.empty}>No saved lists yet.</Text>}
+        ListEmptyComponent={<Text style={styles.empty}>No saved lists yet. Save a basket and it appears here.</Text>}
         renderItem={({ item: h }) => {
           const open = expandedId === h.id;
           const n = countUnits(h.items);
@@ -715,8 +782,11 @@ export default function App() {
  
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor={DARK} />
+      <StatusBar barStyle="light-content" backgroundColor={KALE} />
       <View style={styles.header}>
+        <View style={styles.mark}>
+          <Ionicons name="basket" size={20} color={KALE} />
+        </View>
         <Text style={styles.title}>Net-Pro Label Scan</Text>
       </View>
       <View style={{ flex: 1 }}>
@@ -751,6 +821,18 @@ export default function App() {
               <Text style={styles.codeText}>No barcode attached - this item will not be remembered.</Text>
             ) : null}
             {lNote ? <Text style={styles.noteText}>{lNote}</Text> : null}
+            {learnMode === 'label' && lRaw ? (
+              <View>
+                <Text style={styles.linkText} onPress={() => setShowRaw((v) => !v)}>
+                  {showRaw ? 'Hide what the camera read' : 'Show what the camera read'}
+                </Text>
+                {showRaw ? (
+                  <Text style={styles.rawText} numberOfLines={12}>
+                    {lRaw}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
 
             <Text style={styles.fieldLabel}>Item name</Text>
             <TextInput
@@ -811,7 +893,8 @@ export default function App() {
             </View>
             {learnMode === 'learn' && Platform.OS !== 'web' ? (
               <TouchableOpacity style={styles.readInstead} onPress={readLabelForCode}>
-                <Text style={styles.readInsteadText}>📷  Read the label with the camera instead</Text>
+                <Ionicons name="pricetag" size={17} color={KALE} />
+                <Text style={styles.readInsteadText}>Read the label with the camera instead</Text>
               </TouchableOpacity>
             ) : null}
             {learnMode === 'edit' ? (
@@ -823,226 +906,322 @@ export default function App() {
         </KeyboardAvoidingView>
       </Modal>
       <View style={styles.tabBar}>
-        <TouchableOpacity
-          style={[styles.tab, tab === 'scan' && styles.tabActiveBox]}
-          onPress={() => setTab('scan')}
-        >
-          <Text style={[styles.tabText, tab === 'scan' && styles.tabActive]}>Scan</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.tab, tab === 'products' && styles.tabActiveBox]}
-          onPress={() => setTab('products')}
-        >
-          <Text style={[styles.tabText, tab === 'products' && styles.tabActive]}>
-            Products ({Object.keys(products).length})
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.tab, tab === 'history' && styles.tabActiveBox]}
-          onPress={() => setTab('history')}
-        >
-          <Text style={[styles.tabText, tab === 'history' && styles.tabActive]}>
-            History ({history.length})
-          </Text>
-        </TouchableOpacity>
+        {[
+          ['scan', 'scan', 'Scan'],
+          ['products', 'pricetags', `Products (${Object.keys(products).length})`],
+          ['history', 'time', `History (${history.length})`],
+        ].map(([key, icon, label]) => {
+          const on = tab === key;
+          return (
+            <TouchableOpacity key={key} style={styles.tab} onPress={() => setTab(key)} activeOpacity={0.7}>
+              <View style={[styles.tabIcon, on && styles.tabIconOn]}>
+                <Ionicons name={icon} size={20} color={on ? '#fff' : '#8a9a8f'} />
+              </View>
+              <Text style={[styles.tabText, on && styles.tabActive]}>{label}</Text>
+            </TouchableOpacity>
+          );
+        })}
       </View>
     </View>
   );
 }
  
 // ---------- styles ----------
- 
-const DARK = '#374151'; // main charcoal
-const GRAY = '#9ca3af'; // scan corners (use '#d1d5db' if hard to see)
-const OK = '#16a34a';
-const ERR = '#dc2626';
- 
+
+// Palette: leaf greens for the brand, mango for the one action that matters, chilli for danger
+const KALE = '#14452F'; // header, total card
+const LEAF = '#2D9F5B'; // primary buttons, active tab
+const LEAF_TINT = '#E3F2E7';
+const MANGO = '#FFB627'; // Read label
+const CHILLI = '#D6402B';
+const PAGE = '#F1F6F0';
+const INK = '#14231A';
+const MUTED = '#6B7A70';
+const GRAY = '#d1d5db'; // scan corners
+const OK = '#1F8A4C';
+const ERR = '#C23A27';
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f3f4f6',
-    paddingTop: StatusBar.currentHeight || 0,
+    backgroundColor: PAGE,
     // on a laptop browser keep the app phone-shaped and centred
     ...(Platform.OS === 'web' ? { width: '100%', maxWidth: 480, marginLeft: 'auto', marginRight: 'auto' } : {}),
   },
-  header: { backgroundColor: DARK, paddingVertical: 14, alignItems: 'center' },
-  title: { color: '#fff', fontSize: 20, fontWeight: '700' },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
-  permText: { fontSize: 16, textAlign: 'center', marginBottom: 16, color: '#111827' },
- 
-  // camera + frame  (change frame width/height to resize the scan box)
-  cameraWrap: {
-    height: 260,
-    backgroundColor: '#000',
+  header: {
+    backgroundColor: KALE,
+    paddingTop: (StatusBar.currentHeight || 0) + 12,
+    paddingBottom: 34, // the camera and total card sit over this edge
+    paddingHorizontal: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  mark: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    backgroundColor: MANGO,
     alignItems: 'center',
     justifyContent: 'center',
-    borderBottomLeftRadius: 18,
-    borderBottomRightRadius: 18,
-    overflow: 'hidden',
   },
-  frame: { width: 230, height: 120 }, // wide enough for barcodes as well as QR codes
-  corner: { position: 'absolute', width: 36, height: 36, borderColor: GRAY },
-  tl: { top: 0, left: 0, borderTopWidth: 4, borderLeftWidth: 4, borderTopLeftRadius: 10 },
-  tr: { top: 0, right: 0, borderTopWidth: 4, borderRightWidth: 4, borderTopRightRadius: 10 },
-  bl: { bottom: 0, left: 0, borderBottomWidth: 4, borderLeftWidth: 4, borderBottomLeftRadius: 10 },
-  br: { bottom: 0, right: 0, borderBottomWidth: 4, borderRightWidth: 4, borderBottomRightRadius: 10 },
- 
-  // shown instead of the camera when camera access is off
-  noCamera: { alignItems: 'center', paddingHorizontal: 24, paddingBottom: 30 },
-  noCameraText: { color: '#fff', fontSize: 15, textAlign: 'center', marginBottom: 12 },
-  allowBtn: { backgroundColor: '#fff', paddingVertical: 10, paddingHorizontal: 22, borderRadius: 10 },
-  allowBtnText: { color: DARK, fontSize: 15, fontWeight: '700' },
-  noCameraSub: { color: '#9ca3af', fontSize: 13, marginTop: 12, textAlign: 'center' },
+  title: { color: '#fff', fontSize: 20, fontWeight: '800', letterSpacing: 0.2 },
 
-  // hint label on top of the camera
+  // camera card (overlaps the header)
+  cameraWrap: {
+    height: 270,
+    marginHorizontal: 14,
+    marginTop: -26,
+    backgroundColor: '#0c1a12',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 26,
+    overflow: 'hidden',
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  frame: { width: 230, height: 120, marginBottom: 26 }, // wide enough for barcodes as well as QR codes
+  corner: { position: 'absolute', width: 34, height: 34, borderColor: GRAY },
+  tl: { top: 0, left: 0, borderTopWidth: 4, borderLeftWidth: 4, borderTopLeftRadius: 12 },
+  tr: { top: 0, right: 0, borderTopWidth: 4, borderRightWidth: 4, borderTopRightRadius: 12 },
+  bl: { bottom: 0, left: 0, borderBottomWidth: 4, borderLeftWidth: 4, borderBottomLeftRadius: 12 },
+  br: { bottom: 0, right: 0, borderBottomWidth: 4, borderRightWidth: 4, borderBottomRightRadius: 12 },
+
+  // shown instead of the camera when camera access is off
+  noCamera: { alignItems: 'center', paddingHorizontal: 28 },
+  noCameraText: { color: '#fff', fontSize: 15, textAlign: 'center', marginTop: 10, marginBottom: 14 },
+  allowBtn: { backgroundColor: MANGO, paddingVertical: 11, paddingHorizontal: 24, borderRadius: 14 },
+  allowBtnText: { color: KALE, fontSize: 15, fontWeight: '800' },
+  noCameraSub: { color: '#9fb3a6', fontSize: 13, marginTop: 12, textAlign: 'center' },
+
+  // status pill at the top of the camera
   hint: {
     position: 'absolute',
-    bottom: 12,
-    left: 16,
-    right: 16,
-    backgroundColor: 'rgba(17,24,39,0.65)',
+    top: 12,
+    left: 14,
+    right: 14,
+    backgroundColor: 'rgba(10,25,16,0.6)',
     paddingVertical: 7,
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
     borderRadius: 20,
     alignItems: 'center',
   },
   hintOk: { backgroundColor: OK },
   hintError: { backgroundColor: ERR },
-  hintText: { color: '#fff', fontSize: 14, fontWeight: '600' },
- 
-  // total card
-  totalCard: {
-    backgroundColor: '#fff',
-    marginHorizontal: 12,
-    marginTop: 12,
-    paddingVertical: 14,
-    borderRadius: 14,
+  hintText: { color: '#fff', fontSize: 14, fontWeight: '700' },
+
+  // the one bright action: read a shelf label
+  readBtn: {
+    position: 'absolute',
+    bottom: 14,
+    alignSelf: 'center',
+    flexDirection: 'row',
     alignItems: 'center',
-    elevation: 3,
-    shadowColor: '#000',
-    shadowOpacity: 0.08,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
+    gap: 8,
+    backgroundColor: MANGO,
+    paddingVertical: 11,
+    paddingHorizontal: 22,
+    borderRadius: 26,
+    elevation: 4,
   },
-  totalLabel: { fontSize: 12, color: '#6b7280', letterSpacing: 1 },
-  totalValue: { fontSize: 38, fontWeight: '800', color: DARK, marginTop: 2 },
- 
-  // item rows (name on top, price / quantity / line total underneath)
+  readBtnText: { color: KALE, fontSize: 15, fontWeight: '800' },
+
+  // basket total
+  totalCard: {
+    backgroundColor: KALE,
+    marginHorizontal: 14,
+    marginTop: 12,
+    paddingTop: 12,
+    paddingBottom: 14,
+    paddingHorizontal: 18,
+    borderRadius: 22,
+  },
+  totalTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  totalLabel: { fontSize: 14, color: '#b9d6c4', fontWeight: '600' },
+  countChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 14,
+  },
+  countChipText: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  totalMoney: { flexDirection: 'row', alignItems: 'baseline', gap: 8, marginTop: 2 },
+  cur: { color: MANGO, fontSize: 18, fontWeight: '800' },
+  totalValue: { flex: 1, color: '#fff', fontSize: 42, fontWeight: '800', fontVariant: ['tabular-nums'] },
+
+  // item rows
   row: {
+    flexDirection: 'row',
     backgroundColor: '#fff',
-    marginHorizontal: 12,
-    marginTop: 8,
-    paddingLeft: 14,
-    paddingBottom: 10,
-    borderRadius: 10,
+    marginHorizontal: 14,
+    marginTop: 9,
+    paddingLeft: 12,
+    paddingVertical: 10,
+    borderRadius: 18,
     elevation: 1,
   },
+  avatar: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+    marginTop: 2,
+  },
+  avatarText: { color: '#fff', fontSize: 18, fontWeight: '800' },
   rowTop: { flexDirection: 'row', alignItems: 'center' },
-  rowName: { flex: 1, fontSize: 16, fontWeight: '600', paddingVertical: 10, color: '#111827' },
-  removeBtn: { paddingHorizontal: 14, paddingVertical: 10 },
-  removeText: { color: ERR, fontSize: 16 },
-  rowBottom: { flexDirection: 'row', alignItems: 'center', paddingRight: 14 },
-  unitPrice: { flex: 1, fontSize: 13, color: '#6b7280' },
-  stepper: { flexDirection: 'row', alignItems: 'center', marginRight: 12 },
+  rowName: { flex: 1, fontSize: 16, fontWeight: '700', color: INK },
+  removeBtn: { paddingHorizontal: 10, paddingVertical: 2 },
+  unitPrice: { fontSize: 13, color: MUTED, marginTop: 1 },
+  rowBottom: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8, paddingRight: 14 },
+  stepper: { flexDirection: 'row', alignItems: 'center' },
   stepBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: '#e5e7eb',
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: LEAF_TINT,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  stepText: { fontSize: 20, fontWeight: '700', color: DARK, lineHeight: 22 },
+  stepBtnPlus: { backgroundColor: LEAF },
   qtyInput: {
-    width: 52,
+    width: 48,
     textAlign: 'center',
     fontSize: 17,
-    fontWeight: '700',
-    color: '#111827',
+    fontWeight: '800',
+    color: INK,
     paddingVertical: 0,
   },
-  rowPrice: { fontSize: 16, fontWeight: '800', color: DARK, minWidth: 90, textAlign: 'right' },
-  empty: { textAlign: 'center', color: '#9ca3af', marginTop: 28, fontSize: 15, paddingHorizontal: 20 },
- 
-  // buttons
-  actions: { flexDirection: 'row', padding: 12, gap: 10, backgroundColor: '#fff' },
-  primaryBtn: {
-    backgroundColor: DARK,
-    paddingVertical: 14,
-    borderRadius: 12,
+  rowPrice: { fontSize: 17, fontWeight: '800', color: KALE, textAlign: 'right', fontVariant: ['tabular-nums'] },
+
+  // empty basket
+  emptyBox: { alignItems: 'center', paddingHorizontal: 36, paddingTop: 26 },
+  emptyIcon: {
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    backgroundColor: LEAF_TINT,
     alignItems: 'center',
-    paddingHorizontal: 20,
+    justifyContent: 'center',
+    marginBottom: 12,
   },
-  primaryBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  emptyTitle: { fontSize: 18, fontWeight: '800', color: INK },
+  emptyText: { fontSize: 14, color: MUTED, textAlign: 'center', marginTop: 6, lineHeight: 20 },
+  empty: { textAlign: 'center', color: MUTED, marginTop: 28, fontSize: 15, paddingHorizontal: 24, lineHeight: 21 },
+
+  // buttons
+  actions: { flexDirection: 'row', paddingHorizontal: 14, paddingVertical: 10, gap: 9, backgroundColor: PAGE },
+  primaryBtn: {
+    flexDirection: 'row',
+    gap: 7,
+    backgroundColor: LEAF,
+    height: 52,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  primaryBtnText: { color: '#fff', fontSize: 16, fontWeight: '800' },
   btnDisabled: { opacity: 0.45 },
   secondaryBtn: {
-    backgroundColor: '#e5e7eb',
-    paddingVertical: 14,
-    borderRadius: 12,
+    flexDirection: 'row',
+    gap: 5,
+    backgroundColor: LEAF_TINT,
+    height: 52,
+    borderRadius: 16,
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  secondaryBtnText: { color: '#111827', fontSize: 16, fontWeight: '600' },
- 
-  // manual entry sheet
-  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
+  secondaryBtnText: { color: KALE, fontSize: 16, fontWeight: '700' },
+  ghostBtn: {
+    flexDirection: 'row',
+    gap: 6,
+    height: 52,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: '#f0c9c2',
+    backgroundColor: '#fff',
+  },
+  ghostBtnText: { color: CHILLI, fontSize: 15, fontWeight: '700' },
+
+  // pop-up sheets
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(10,25,16,0.5)', justifyContent: 'flex-end' },
   sheet: {
     backgroundColor: '#fff',
-    padding: 18,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
+    padding: 20,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
   },
-  sheetTitle: { fontSize: 18, fontWeight: '800', color: DARK, marginBottom: 12 },
-  fieldLabel: { fontSize: 13, color: '#6b7280', marginBottom: 4, marginTop: 6 },
+  sheetTitle: { fontSize: 20, fontWeight: '800', color: INK, marginBottom: 10 },
+  fieldLabel: { fontSize: 13, color: MUTED, marginBottom: 4, marginTop: 8, fontWeight: '600' },
   field: {
-    borderWidth: 1,
-    borderColor: '#d1d5db',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 16,
-    color: '#111827',
-    backgroundColor: '#f9fafb',
-  },
-  sheetTotal: { fontSize: 15, fontWeight: '700', color: DARK, marginTop: 12 },
- 
-  readBtn: {
-    position: 'absolute',
-    top: 10,
-    right: 12,
-    backgroundColor: 'rgba(255,255,255,0.92)',
-    paddingVertical: 8,
+    borderWidth: 1.5,
+    borderColor: '#dbe6de',
+    borderRadius: 14,
     paddingHorizontal: 14,
-    borderRadius: 20,
+    paddingVertical: 11,
+    fontSize: 16,
+    color: INK,
+    backgroundColor: '#f7faf7',
   },
-  readBtnText: { color: DARK, fontSize: 14, fontWeight: '700' },
-  readInstead: { alignItems: 'center', paddingVertical: 14 },
-  readInsteadText: { color: DARK, fontSize: 15, fontWeight: '600' },
-  linkText: { color: '#2563eb', fontWeight: '700' },
-  noteText: { fontSize: 13, color: '#b45309', marginBottom: 4 },
-  codeText: { fontSize: 13, color: '#6b7280', marginBottom: 4 },
-  productsHelp: { fontSize: 13, color: '#6b7280', marginBottom: 10, textAlign: 'center' },
+  sheetTotal: { fontSize: 16, fontWeight: '800', color: KALE, marginTop: 14 },
+  codeText: { fontSize: 13, color: MUTED, marginBottom: 4 },
+  noteText: { fontSize: 13, color: '#b45309', marginBottom: 4, fontWeight: '600' },
+  rawText: { fontSize: 12, color: MUTED, backgroundColor: '#f1f5f2', borderRadius: 10, padding: 8, marginTop: 6, marginBottom: 4 },
+  linkText: { color: LEAF, fontWeight: '800' },
+  readInstead: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 12,
+    paddingVertical: 13,
+    borderRadius: 16,
+    backgroundColor: '#FFF3D6',
+  },
+  readInsteadText: { color: KALE, fontSize: 15, fontWeight: '700' },
+  productsHelp: { fontSize: 13, color: MUTED, marginBottom: 10, textAlign: 'center' },
 
-  // history
+  // products and history cards
   card: {
     backgroundColor: '#fff',
-    borderRadius: 12,
+    borderRadius: 18,
     padding: 14,
     marginBottom: 10,
     elevation: 1,
   },
-  cardDate: { fontSize: 14, color: '#6b7280' },
-  cardRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 },
-  cardMeta: { fontSize: 15, color: '#374151' },
-  cardTotal: { fontSize: 18, fontWeight: '700', color: DARK },
-  detailRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 },
-  detailName: { flex: 1, fontSize: 15, color: '#111827' },
-  detailPrice: { fontSize: 15, fontWeight: '600', color: DARK },
-  deleteText: { color: ERR, marginTop: 10, fontWeight: '600' },
- 
+  cardLine: { flexDirection: 'row', alignItems: 'center' },
+  cardName: { fontSize: 16, fontWeight: '700', color: INK },
+  cardDate: { fontSize: 13, color: MUTED, marginTop: 1 },
+  cardRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 },
+  cardMeta: { fontSize: 15, color: INK },
+  cardTotal: { fontSize: 17, fontWeight: '800', color: KALE, marginLeft: 10 },
+  detailRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 5 },
+  detailName: { flex: 1, fontSize: 15, color: INK },
+  detailPrice: { fontSize: 15, fontWeight: '700', color: KALE },
+  deleteText: { color: CHILLI, marginTop: 12, fontWeight: '700' },
+
   // tab bar
-  tabBar: { flexDirection: 'row', backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: '#e5e7eb' },
-  tab: { flex: 1, paddingVertical: 14, alignItems: 'center', borderTopWidth: 3, borderTopColor: 'transparent' },
-  tabActiveBox: { borderTopColor: DARK },
-  tabText: { fontSize: 15, color: '#9ca3af', fontWeight: '600' },
-  tabActive: { color: DARK, fontWeight: '800' },
+  tabBar: {
+    flexDirection: 'row',
+    backgroundColor: '#fff',
+    paddingTop: 8,
+    paddingBottom: 6,
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    elevation: 12,
+  },
+  tab: { flex: 1, alignItems: 'center' },
+  tabIcon: { width: 54, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  tabIconOn: { backgroundColor: LEAF },
+  tabText: { fontSize: 12, color: '#8a9a8f', fontWeight: '600', marginTop: 3 },
+  tabActive: { color: KALE, fontWeight: '800' },
 });
