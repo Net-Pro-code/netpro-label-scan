@@ -1,0 +1,29 @@
+{
+  "expo": {
+    "name": "Net-Pro Label Scan",
+    "slug": "netpro-label-scan",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "android": {
+      "package": "com.netprosys.labelscan",
+      "permissions": [
+        "android.permission.CAMERA"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Net-Pro Label Scan needs the camera to scan QR codes and barcodes and to read shelf labels.",
+          "recordAudioAndroid": false
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "2125e663-b7ae-4589-a62a-e71f26be3c86"
+      }
+    },
+    "owner": "rodmas"
+  }
+}

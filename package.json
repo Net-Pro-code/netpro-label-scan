@@ -1,0 +1,20 @@
+{
+  "name": "netpro-label-scan",
+  "version": "1.0.0",
+  "main": "expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "test": "node test-parse.mjs"
+  },
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "2.1.2",
+    "@react-native-ml-kit/text-recognition": "^1.5.2",
+    "expo": "~53.0.0",
+    "expo-asset": "~11.1.7",
+    "expo-camera": "~16.1.6",
+    "expo-status-bar": "~2.2.3",
+    "react": "19.0.0",
+    "react-native": "0.79.6"
+  },
+  "private": true
+}
