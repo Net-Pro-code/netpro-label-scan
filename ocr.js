@@ -7,7 +7,15 @@ export async function readTextLines(uri) {
     throw new Error('Reading labels works in the Android app only.');
   }
   const TextRecognition = require('@react-native-ml-kit/text-recognition').default;
-  const result = await TextRecognition.recognize(uri);
+  // Re-save the photo first: this makes the picture upright (camera photos can be stored sideways
+  // with a rotation flag), which the text reader needs to read the words properly.
+  let readUri = uri;
+  try {
+    const Manipulator = require('expo-image-manipulator');
+    const out = await Manipulator.manipulateAsync(uri, [], { compress: 1, format: Manipulator.SaveFormat.JPEG });
+    if (out && out.uri) readUri = out.uri;
+  } catch (e) {}
+  const result = await TextRecognition.recognize(readUri);
   const lines = [];
   (result.blocks || []).forEach((b) =>
     (b.lines || []).forEach((l) =>

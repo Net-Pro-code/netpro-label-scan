@@ -134,7 +134,7 @@ export default function App() {
   const [items, setItems] = useState([]);
   const [history, setHistory] = useState([]);
   const [loaded, setLoaded] = useState(false);
-  const [message, setMessage] = useState('Scan a QR code or barcode');
+  const [message, setMessage] = useState('Point at a price tag, barcode or QR code');
   const [products, setProducts] = useState(SEED_PRODUCTS);
   const [messageType, setMessageType] = useState('info'); // info | ok | error
   const [expandedId, setExpandedId] = useState(null);
@@ -212,8 +212,9 @@ export default function App() {
         setMessageType('ok');
         setMessage(`Added: ${known.name}  ${formatMWK(known.price)}`);
       } else {
+        // new product: photograph the label and read its name and price by itself
         Vibration.vibrate([0, 80, 60, 80]);
-        openLearn(code);
+        readLabelPhoto(code, data);
       }
       return;
     }
@@ -265,29 +266,68 @@ export default function App() {
     setLearnOpen(true);
   }
 
-  // Take a photo of the shelf label, read the text, show name + price to confirm
-  async function readLabelPhoto() {
-    if (busy || !cameraRef.current) return;
+  // Photograph the shelf label and read its name and price.
+  //  - scannedCode given  = the camera just saw an unknown barcode: do everything automatically
+  //  - no scannedCode     = the user tapped Read label
+  async function readLabelPhoto(scannedCode, rawData) {
+    const auto = typeof scannedCode === 'string' && scannedCode !== '';
+    if (busy) return;
+    if (!cameraRef.current) {
+      if (auto) openLearn(scannedCode); // no camera to photograph with: type it once
+      return;
+    }
     setBusy(true);
     setMessageType('info');
-    setMessage('Reading label...');
+    setMessage(auto ? 'New product - reading its label...' : 'Reading label...');
     try {
-      const pic = await cameraRef.current.takePictureAsync({ quality: 1 });
-      const lines = await readTextLines(pic.uri);
-      const parsed = parseLabel(lines, pic.height);
+      // automatic reads get up to three photos (the first can be blurry or caught mid-move)
+      let lines = [];
+      let parsed = { price: null };
+      const tries = auto ? 3 : 1;
+      for (let k = 0; k < tries; k++) {
+        if (k > 0) {
+          setMessage(`Reading the label... (try ${k + 1} of ${tries})`);
+          await new Promise((r) => setTimeout(r, 700));
+        }
+        const pic = await cameraRef.current.takePictureAsync({ quality: 1 });
+        lines = await readTextLines(pic.uri);
+        parsed = parseLabel(lines, pic.height);
+        if (parsed.price && parsed.name && !parsed.guessed) break;
+      }
+      const raw = lines.length ? lines.map((l) => l.text).join('\n') : '(the camera read no text)';
+
       if (!parsed.price) {
         Vibration.vibrate([0, 150, 100, 150]);
-        setMessageType('error');
-        setMessage('No price found. Move closer so the label fills the frame.');
+        if (auto) {
+          showLearn(
+            'learn',
+            scannedCode,
+            '',
+            '',
+            'Could not read a price from the label. See what the camera read below, or type it once and the app remembers it.',
+            raw
+          );
+        } else {
+          setMessageType('error');
+          setMessage('No price found. Move closer so the label fills the frame.');
+        }
         return;
       }
-      // the barcode number printed on the label (checked), else one scanned a moment ago
+
+      // which barcode this label belongs to: the one just scanned, else the number printed on the label,
+      // else one scanned a moment ago
       const fresh = Date.now() - pendingCode.current.time < 30000;
-      const code = parsed.code ? normalizeCode(parsed.code) : fresh ? pendingCode.current.code : '';
+      const code = auto
+        ? scannedCode
+        : parsed.code
+        ? normalizeCode(parsed.code)
+        : fresh
+        ? pendingCode.current.code
+        : '';
       const saved = code ? products[code] : null;
 
-      // a product the app already knows, at the same price: add it, no form
-      if (saved && saved.price === parsed.price && !parsed.guessed) {
+      // Read label on a product the app knows, same price: just add it
+      if (!auto && saved && saved.price === parsed.price && !parsed.guessed) {
         Vibration.vibrate(80);
         addToList({ name: saved.name, price: saved.price }, 1);
         setMessageType('ok');
@@ -295,18 +335,44 @@ export default function App() {
         return;
       }
 
+      // New product read cleanly (name and price): learn it and add it, no form
+      if (auto && parsed.name && !parsed.guessed) {
+        Vibration.vibrate(80);
+        setProducts((prev) => ({ ...prev, [code]: { name: parsed.name, price: parsed.price } }));
+        addToList({ name: parsed.name, price: parsed.price }, 1);
+        setMessageType('ok');
+        setMessage(`Learned & added: ${parsed.name}  ${formatMWK(parsed.price)}`);
+        return;
+      }
+
+      // Something is unclear (no name, or the price is a guess): show it for a quick check
       Vibration.vibrate(80);
       let note = '';
       if (parsed.guessed) note = 'The "MK" was unclear, so this price is a guess. Check it.';
+      else if (!parsed.name) note = 'The name could not be read. Type it once.';
       else if (saved && saved.price !== parsed.price)
         note = `Saved price was ${formatMWK(saved.price)} - saving will update it.`;
-      const raw = lines.map((l) => l.text).join('\n');
       showLearn('label', code, parsed.name, String(parsed.price), note, raw);
     } catch (e) {
-      setMessageType('error');
-      setMessage('Could not read the label. Try again or use Add item.');
+      if (auto) {
+        showLearn(
+          'learn',
+          scannedCode,
+          '',
+          '',
+          'The label could not be read. Type it once and the app remembers it.',
+          'ERROR: ' + ((e && e.message) || String(e))
+        );
+      } else {
+        setMessageType('error');
+        setMessage('Could not read the label: ' + ((e && e.message) || String(e)).slice(0, 60));
+      }
     } finally {
       setBusy(false);
+      // the tag is probably still in view: do not add it a second time by accident
+      if (auto && !learnOpenRef.current) {
+        lastScan.current = { data: rawData, time: Date.now() + 2500 };
+      }
     }
   }
 
@@ -509,7 +575,7 @@ export default function App() {
           {cameraReady && Platform.OS !== 'web' ? (
             <TouchableOpacity
               style={[styles.readBtn, busy && styles.btnDisabled]}
-              onPress={readLabelPhoto}
+              onPress={() => readLabelPhoto()}
               disabled={busy}
               activeOpacity={0.85}
             >
@@ -821,7 +887,7 @@ export default function App() {
               <Text style={styles.codeText}>No barcode attached - this item will not be remembered.</Text>
             ) : null}
             {lNote ? <Text style={styles.noteText}>{lNote}</Text> : null}
-            {learnMode === 'label' && lRaw ? (
+            {(learnMode === 'label' || learnMode === 'learn') && lRaw ? (
               <View>
                 <Text style={styles.linkText} onPress={() => setShowRaw((v) => !v)}>
                   {showRaw ? 'Hide what the camera read' : 'Show what the camera read'}

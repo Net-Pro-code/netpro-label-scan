@@ -1,6 +1,7 @@
 {
   "expo": {
     "name": "Net-Pro Label Scan",
+    "web": { "bundler": "metro", "output": "single" },
     "slug": "netpro-label-scan",
     "icon": "./icon.png",
     "version": "1.0.0",
